@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <fcntl.h>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -45,23 +47,94 @@ std::string filesystem(bool userdata,const std::string& selected="ext4") {
         choices.push_back(type);choices.push_back(type==selected?"Current filesystem":cap.get("limitation","Native formatter and checker").asString());
     }need(!choices.empty(),"No reviewed native filesystem tools are installed");return menu("Filesystem for this volume",choices);
 }
-Value layout_request(bool single,const std::string& fs) {
+constexpr std::uint64_t gib=1073741824ULL;
+std::string gib_text(std::uint64_t bytes) {
+    if(bytes<gib)return std::to_string(bytes/1048576)+" MiB";
+    const auto tenths=bytes/(gib/10);return std::to_string(tenths/10)+"."+std::to_string(tenths%10)+" GiB";
+}
+// Mirrors ure::minimum() in shared/recovery/multiboot.cpp. That function is not
+// exported from the imported component, so these values only shape prompts; the
+// planner remains the authority and still refuses anything below its own floor.
+std::map<std::string,std::uint64_t> role_minimums() {
+    return {{"esp",512000000},{"linux_boot",512000000},{"linux",40*gib},{"linux2",40*gib},
+            {"linux_swap",gib},{"windows",50*gib},{"shared",32*1048576},{"userdata",64*gib}};
+}
+std::optional<std::uint64_t> requested_bytes(const std::string& size,const std::string& unit,std::uint64_t pool) {
+    if(size.empty()||size.size()>24||size.front()=='.'||size.front()==',')return std::nullopt;
+    std::uint64_t whole=0,fraction=0,scale=1000000;bool dot=false;unsigned places=0;
+    for(char c:size) {
+        if(c=='.'||c==','){if(dot)return std::nullopt;dot=true;continue;}
+        if(c<'0'||c>'9')return std::nullopt;
+        const auto digit=static_cast<unsigned>(c-'0');
+        if(dot){if(++places>6)return std::nullopt;scale/=10;fraction+=digit*scale;}
+        else{if(whole>(UINT64_MAX/1000000-digit)/10)return std::nullopt;whole=whole*10+digit;}
+    }
+    if(dot&&places==0)return std::nullopt;
+    const auto scaled=static_cast<__int128>(whole)*1000000+fraction;
+    __int128 bytes=0;
+    if(unit=="%")bytes=scaled*pool/(100*1000000);
+    else {
+        const std::uint64_t factor=unit=="GiB"?gib:unit=="GB"?1000000000ULL:unit=="MiB"?1048576ULL:unit=="MB"?1000000ULL:0;
+        if(!factor)return std::nullopt;
+        bytes=scaled*factor/1000000;
+    }
+    if(bytes<0||bytes>INT64_MAX)return std::nullopt;
+    return static_cast<std::uint64_t>(bytes);
+}
+std::uint64_t initial_bytes(const std::string& role,std::uint64_t floor,std::uint64_t maximum) {
+    const auto preferred=role=="esp"||role=="linux_boot"?gib:role=="linux_swap"?8*gib:role=="windows"?50*gib:std::max(floor,maximum/2);
+    return std::min(preferred,maximum);
+}
+std::string size_text(std::uint64_t bytes,const std::string& unit,std::uint64_t pool,bool up,unsigned places) {
+    std::uint64_t scale=1;for(unsigned i=0;i<places;++i)scale*=10;
+    const std::uint64_t factor=unit=="GiB"?gib:unit=="GB"?1000000000ULL:unit=="MiB"?1048576ULL:1000000ULL;
+    const auto numerator=unit=="%"?static_cast<__int128>(bytes)*100*scale:static_cast<__int128>(bytes)*scale;
+    const auto denominator=unit=="%"?static_cast<__int128>(pool):static_cast<__int128>(factor);
+    auto scaled=numerator/denominator;if(up && numerator%denominator)++scaled;
+    const auto fraction=static_cast<std::uint64_t>(scaled%scale);const auto digits=std::to_string(fraction);
+    return std::to_string(static_cast<std::uint64_t>(scaled/scale))+"."+std::string(places>digits.size()?places-digits.size():0,'0')+digits;
+}
+Value layout_request(bool single,const std::string& fs,std::uint64_t pool) {
     Value request;request["schema"]=1;request["format"]="uke-multiboot-request";request["action"]=single?"restore-default":"setup";request["keep_userdata"]=true;request["advanced"]=false;request["userdata_filesystem"]=fs;request["partitions"]=Value(Json::arrayValue);
     if(single)return request;
-    const auto roles=dialog({"--separate-output","--checklist","Select volumes. Userdata keeps the remaining space (at least 64 GiB); every new volume follows userdata.","23","92","10","esp","EFI system partition (512 MiB - 4 GiB)","on","linux_boot","Separate Linux boot (at least 512 MiB)","on","linux","Linux root (at least 40 GiB)","on","linux_swap","Linux swap (at least 1 GiB)","off","windows","Windows root / NTFS (at least 50 GiB)","off","shared","Shared data","off","linux2","Second Linux root (at least 40 GiB)","off"});
-    request["advanced"]=menu("Layout options",{"standard","Standard labels and order","advanced","Custom labels and order; userdata always first"})=="advanced";
-    std::istringstream selected(roles);std::string role;
-    while(std::getline(selected,role)) {
-        if(role.empty())continue;
-        need(ure::identifier(role),"Invalid role selection");Value row;row["role"]=role;
-        row["size"]=input("Size for "+role+" (numeric amount)",role=="esp"||role=="linux_boot"?"1":role=="linux_swap"?"8":role=="windows"?"50":"40");
-        row["unit"]=menu("Unit for "+role,{"GiB","Binary gibibytes","GB","Decimal gigabytes","MiB","Binary mebibytes","MB","Decimal megabytes","%","Percent of original userdata pool"});
-        row["filesystem"]=role=="esp"?"fat32":role=="windows"?"ntfs":role=="linux_swap"?"linux-swap":filesystem(false);
-        if(request["advanced"]==true)row["label"]=input("GPT label for "+role+" (unique ASCII identifier, at most 36 characters)",role);
-        request["partitions"].append(row);
+    const auto floors=role_minimums();const auto reserve=floors.at("userdata");
+    need(pool>reserve,"Original userdata is too small to keep Android and add Linux");
+    const auto budget=pool-reserve;
+    std::vector<std::string> chosen;
+    for(;;) {
+        const auto roles=dialog({"--separate-output","--checklist","Original userdata is "+gib_text(pool)+"; at least "+gib_text(reserve)+" stays for Android, leaving "+gib_text(budget)+" for every Linux volume together.","23","92","10","esp","EFI system partition (512 MiB - 4 GiB)","on","linux_boot","Separate Linux boot (at least 512 MiB)","on","linux","Linux root (at least 40 GiB)","on","linux_swap","Linux swap (at least 1 GiB)","off","windows","Windows root / NTFS (at least 50 GiB)","off","shared","Shared data","off","linux2","Second Linux root (at least 40 GiB)","off"});
+        std::istringstream selected(roles);chosen.clear();std::string role;
+        while(std::getline(selected,role)){if(role.empty())continue;need(ure::identifier(role),"Invalid role selection");need(floors.contains(role),"Unknown multiboot role");chosen.push_back(role);}
+        if(chosen.empty()){notice("Select at least one volume to place beside Android.");continue;}
+        std::uint64_t needed=0;for(const auto& name:chosen)needed+=floors.at(name);
+        if(needed<=budget)break;
+        notice("The selected volumes need "+gib_text(needed)+" before any data, but only "+gib_text(budget)+" is available once Android keeps its "+gib_text(reserve)+".\n\nDeselect a volume and select again.");
     }
+    std::uint64_t minima=0;for(const auto& name:chosen)minima+=floors.at(name);
+    request["advanced"]=menu("Layout options",{"standard","Standard labels and order","advanced","Custom labels and order; userdata always first"})=="advanced";
+    Value partitions(Json::arrayValue);
+    for(;;) {
+        partitions=Value(Json::arrayValue);std::uint64_t total=0;bool known=true;
+        for(const auto& role:chosen) {
+            const auto maximum=std::min(role=="esp"?4*gib:UINT64_MAX,budget-(minima-floors.at(role)));const auto floor=floors.at(role);
+            const auto preferred=initial_bytes(role,floor,maximum);
+            Value row;row["role"]=role;
+            row["unit"]=menu("Unit for "+role,{"GiB","Binary gibibytes","GB","Decimal gigabytes","MiB","Binary mebibytes","MB","Decimal megabytes","%","Percent of original userdata pool"});
+            const auto unit=row["unit"].asString();
+            auto initial=size_text(preferred,unit,pool,preferred!=maximum,3);
+            if(const auto parsed=requested_bytes(initial,unit,pool);!parsed||*parsed<floor||*parsed>maximum)initial=size_text(preferred,unit,pool,false,6);
+            row["size"]=input("Size for "+role+" in "+unit+" ("+size_text(floor,unit,pool,true,3)+" - "+size_text(maximum,unit,pool,false,3)+")",initial);
+            row["filesystem"]=role=="esp"?"fat32":role=="windows"?"ntfs":role=="linux_swap"?"linux-swap":filesystem(false);
+            if(request["advanced"]==true)row["label"]=input("GPT label for "+role+" (unique ASCII identifier, at most 36 characters)",role);
+            if(const auto bytes=requested_bytes(row["size"].asString(),unit,pool))total+=*bytes;else known=false;
+            partitions.append(row);
+        }
+        if(!known||total<=budget)break;
+        notice("These sizes need "+gib_text(total)+", but only "+gib_text(budget)+" is available after Android keeps its "+gib_text(reserve)+".\n\nEnter smaller sizes.");
+    }
+    request["partitions"]=partitions;
     if(request["advanced"]==true) {
-        std::string initial="userdata";for(const auto& row:request["partitions"])initial+=" "+row["role"].asString();
+        std::string initial="userdata";for(const auto& row:partitions)initial+=" "+row["role"].asString();std::string role;
         const auto order=input("Partition ROLE order, separated by spaces. Userdata must be first.",initial);std::istringstream stream(order);request["order"]=Value(Json::arrayValue);while(stream>>role)request["order"].append(role);
     }return request;
 }
@@ -80,7 +153,7 @@ int wizard(bool singleboot,bool dry_run) {
         if(inspection["existing_multiboot"]==true){const fs::path path=input("Completed uke-control ownership.json receipt for the current child partitions");trusted(path.parent_path());receipt=load_private(path);require_ownership(inspection,receipt,current.target.identity);save_private(job/"previous-ownership.json",receipt);}
         const bool preserve=menu("Userdata file policy",{"preserve","Preserve the verified filesystem and files","recreate","Erase userdata and create a new Linux filesystem; two approvals"})=="preserve";
         const auto selectedfs=preserve?current.evidence.filesystem:filesystem(true,current.evidence.filesystem);
-        auto request=layout_request(singleboot,selectedfs);
+        auto request=layout_request(singleboot,selectedfs,inspection["pool"]["bytes"].asUInt64());
         auto proposal=propose(system,current.target,request,job/"original-gpt",firmware,receipt,current.evidence,preserve,true);
         bool finish_fastboot=true;
         if(proposal.document["route"]=="direct") {

@@ -18,6 +18,14 @@ and swap retain their required filesystem types. Native format/check tools must
 be available; unavailable adapters and inadequate format sizes block the plan.
 ZFS has no admitted pool adapter and is unavailable.
 
+The allocation pool is the original userdata extent, aligned to 1 MiB. The imported
+planner caps it at 512 GiB and refuses a larger extent (`invalid-user-area`) instead
+of truncating it, so a device whose userdata exceeds that bound cannot be converted
+until the component limit changes. Size prompts show each role's minimum and the
+largest value this device can give it, default Linux roots to half of what remains
+after Android keeps its 64 GiB, and the wizard re-asks instead of failing when the
+selection or the entered sizes do not fit.
+
 ```text
 singleboot / multiboot
 ├─ Identify exact Uke / SM7675 and the unique writable 4 KiB UFS userdata LUN
