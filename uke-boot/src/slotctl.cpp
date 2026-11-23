@@ -273,9 +273,9 @@ static int switch_slot(const std::string &target_name, bool dry_run) {
     fs::create_directories(state, ec);
     need(!ec, "Cannot create slot backup directory");
 
-    std::vector<slot::Disk *> changed;
+    std::vector<std::pair<std::string, slot::Disk *>> changed;
     for (auto &disk : disks) {
-        if (disk->gpt->prepare(current, target)) changed.push_back(disk->gpt.get());
+        if (disk->gpt->prepare(current, target)) changed.emplace_back(disk->name, disk->gpt.get());
     }
     need(!changed.empty(), "No consistent QTI slot metadata found");
     if (dry_run) {
@@ -283,16 +283,17 @@ static int switch_slot(const std::string &target_name, bool dry_run) {
                   << " and set UFS boot LUN " << target + 1 << "; no bytes written\n";
         return 0;
     }
-    for (auto *disk : changed) {
-        // The backup is written before any metadata mutation.
-        disk->backup(state / ("gpt-" + std::to_string(getpid()) + "-" + std::to_string(current) + "-" + std::to_string(target) + ".bin"));
+    for (auto &[disk_name, disk] : changed) {
+        // The backup is written before any metadata mutation, one file per GPT.
+        disk->backup(state / ("gpt-" + disk_name + "-" + std::to_string(getpid()) + "-" +
+                               std::to_string(current) + "-" + std::to_string(target) + ".bin"));
     }
     try {
-        for (auto *disk : changed) disk->commit();
+        for (auto &[disk_name, disk] : changed) disk->commit();
         (void)slot::boot_lun(bsg.value, target + 1);
     } catch (...) {
         try {
-            for (auto *disk : changed) disk->restore();
+            for (auto &[disk_name, disk] : changed) disk->restore();
             (void)slot::boot_lun(bsg.value, current + 1);
         } catch (...) {
             throw std::runtime_error("Slot switch and restoration failed; retain backups and use recovery");
