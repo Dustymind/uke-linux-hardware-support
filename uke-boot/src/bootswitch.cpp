@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/fs.h>
 #include <filesystem>
 #include <fstream>
@@ -73,8 +74,15 @@ static void backup_file(const fs::path &path, const Bytes &data) {
     }
     write_file(path, data);
 }
-static Bytes read_partition(const char *label) {
+static std::string resolved_partition(const char *label) {
     const auto path = std::string("/dev/disk/by-partlabel/") + label;
+    char target[PATH_MAX];
+    need(realpath(path.c_str(), target) != nullptr,
+         std::string("Cannot resolve ") + path + ": " + std::strerror(errno));
+    return target;
+}
+static Bytes read_partition(const char *label) {
+    const auto path = resolved_partition(label);
     const int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     need(fd >= 0, std::string("Cannot open ") + path + ": " + std::strerror(errno));
     struct stat st{};
@@ -94,7 +102,7 @@ static Bytes read_partition(const char *label) {
     return data;
 }
 static void write_partition(const char *label, const Bytes &data) {
-    const auto path = std::string("/dev/disk/by-partlabel/") + label;
+    const auto path = resolved_partition(label);
     const int fd = open(path.c_str(), O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     need(fd >= 0, std::string("Cannot open ") + path + ": " + std::strerror(errno));
     struct stat st{};
