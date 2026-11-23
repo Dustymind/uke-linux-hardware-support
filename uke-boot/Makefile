@@ -42,7 +42,10 @@ test-native-profile:
 test-startup:
 	bash tests/startup-contract.sh
 	bash tests/startup-native.sh
-test-kernel-update:
+test-slotctl:
+	mkdir -p build/tests
+	c++ -std=c++20 -O2 -Wall -Wextra -Werror $$(pkg-config --cflags --libs fdisk zlib) src/slotctl.cpp -o build/tests/uke-slotctl
+test-kernel-update: test-slotctl
 	mkdir -p build/tests
 	c++ -std=c++20 -O2 -Wall -Wextra -Werror tests/kernel-update.cpp -o build/tests/kernel-update-contract $$(pkg-config --cflags --libs openssl libsystemd)
 	build/tests/kernel-update-contract
