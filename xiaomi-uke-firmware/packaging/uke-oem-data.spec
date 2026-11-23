@@ -31,6 +31,9 @@ install -Dm644 ssc/sns_tppe.so %{buildroot}%{_prefix}/lib/firmware/qcom/uke/sens
 mkdir -p %{buildroot}%{_prefix}/lib/firmware/qca
 cp -a bt/image/. %{buildroot}%{_prefix}/lib/firmware/qca/
 cp -a firmware/. %{buildroot}%{_prefix}/lib/firmware/
+# Iris requests qcom/uke/vpu30_2v.mbn; the OEM payload lives under qcom/vpu.
+install -Dm644 firmware/qcom/vpu/vpu30_2v.mbn \
+    %{buildroot}%{_prefix}/lib/firmware/qcom/uke/vpu30_2v.mbn
 
 %files
 %{_datadir}/uke-sensors/odm
@@ -42,6 +45,7 @@ cp -a firmware/. %{buildroot}%{_prefix}/lib/firmware/
 %{_prefix}/lib/firmware/qca6750
 %{_prefix}/lib/firmware/qcom/gen71100_*
 %{_prefix}/lib/firmware/qcom/vpu
+%{_prefix}/lib/firmware/qcom/uke/vpu30_2v.mbn
 %{_prefix}/lib/firmware/ath11k/WCN6750/hw1.0
 
 %changelog
