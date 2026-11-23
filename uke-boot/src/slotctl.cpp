@@ -252,7 +252,7 @@ static int status() {
     return 0;
 }
 
-static int switch_slot(const std::string &target_name) {
+static int switch_slot(const std::string &target_name, bool dry_run) {
     need(target_name == "a" || target_name == "b", "Target must be a or b");
     const auto controller = current_root_controller();
     const auto disks = metadata(controller);
@@ -278,6 +278,11 @@ static int switch_slot(const std::string &target_name) {
         if (disk->gpt->prepare(current, target)) changed.push_back(disk->gpt.get());
     }
     need(!changed.empty(), "No consistent QTI slot metadata found");
+    if (dry_run) {
+        std::cout << "dry-run: would switch " << (current ? "b" : "a") << " -> " << target_name
+                  << " and set UFS boot LUN " << target + 1 << "; no bytes written\n";
+        return 0;
+    }
     for (auto *disk : changed) {
         // The backup is written before any metadata mutation.
         disk->backup(state / ("gpt-" + std::to_string(getpid()) + "-" + std::to_string(current) + "-" + std::to_string(target) + ".bin"));
@@ -320,9 +325,9 @@ int main(int argc, char **argv) {
     try {
         need(geteuid() == 0, "Root privileges are required");
         if (argc == 2 && std::string(argv[1]) == "status") return status();
-        if (argc == 3 && std::string(argv[1]) == "switch") return switch_slot(argv[2]);
+        if ((argc == 3 || (argc == 4 && std::string(argv[3]) == "--dry-run")) && std::string(argv[1]) == "switch") return switch_slot(argv[2], argc == 4);
         if (argc == 2 && std::string(argv[1]) == "accept") return accept_slot();
-        std::cerr << "Usage: uke-slotctl status | switch a|b | accept\n";
+        std::cerr << "Usage: uke-slotctl status | switch a|b [--dry-run] | accept\n";
         return 2;
     } catch (const std::exception &error) {
         std::cerr << "uke-slotctl: " << error.what() << '\n';
