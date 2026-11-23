@@ -194,11 +194,17 @@ int main(int argc, char **argv) {
         }
         if (argc >= 2 && (std::string(argv[1]) == "import-android" || std::string(argv[1]) == "import-linux")) {
             const auto kind = std::string(argv[1]).substr(7);
-            need(argc <= 3, "import-* takes at most --from FILE");
             fs::path source;
-            if (argc == 3) source = argv[2];
-            else source = kind == "android" ? fs::path("/dev/disk/by-partlabel/boot_a")
-                                             : fs::path("/dev/disk/by-partlabel/boot_b");
+            if (argc == 2) {
+                source = kind == "android" ? fs::path("/dev/disk/by-partlabel/boot_a")
+                                           : fs::path("/dev/disk/by-partlabel/boot_b");
+            } else if (argc == 3) {
+                source = argv[2];
+            } else if (argc == 4 && std::string(argv[2]) == "--from") {
+                source = argv[3];
+            } else {
+                need(false, "Usage: import-android|import-linux [--from FILE]");
+            }
             if (source.string().starts_with("/dev/")) {
                 const auto image = read_partition(source.filename().c_str());
                 const auto temporary = fs::path("/tmp") / ("uke-import-" + kind + ".img");
